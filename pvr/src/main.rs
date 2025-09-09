@@ -1,105 +1,94 @@
-mod cli;
+mod cli; // existing
 mod setup;
-mod util;
 
+use std::path::{Path, PathBuf};
+
+use crate::cli::Cli;
 use clap::Parser;
-use pvr_core::mdx::MDX_PRESETS;
-
-use cli::Cli;
-use setup::{setup_ort, setup_tracing};
-use util::{read_audio, write_audio, AudioFormat};
+use pvr; // the lib
+use pvr::AudioFormat;
+use setup::setup_tracing;
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
 
 fn main() {
   let args = Cli::parse();
 
-  let Some(preset) = args.preset else {
-    println!("Please specify the model you wish to use");
-    println!("All available models:");
-    for (id, p) in MDX_PRESETS.iter().enumerate() {
-      if p.exists() {
-        println!("{id}. {} ({})", p.name, p.model_type);
-      }
-    }
-    return;
-  };
-
   setup_tracing();
-  setup_ort(&args);
+
+  let mut backends = Vec::new();
+  #[cfg(target_os = "windows")]
+  if args.directml_backend {
+    backends.push(pvr_core::config::Backend::DirectML);
+  }
+  #[cfg(target_os = "macos")]
+  if args.coreml_backend {
+    backends.push(pvr_core::config::Backend::CoreML);
+  }
+  if args.cuda_backend {
+    backends.push(pvr_core::config::Backend::CUDA);
+  }
+  if args.tensorrt_backend {
+    backends.push(pvr_core::config::Backend::TensorRT);
+  }
+
+  backends.push(pvr_core::config::Backend::CPU);
 
   let output_format = match args.format.as_str() {
     "wav" => AudioFormat::Wav,
     "flac" => AudioFormat::Flac,
-    _ => {
-      tracing::error!(format = args.format, "Unknown output audio format");
+    other => {
+      tracing::error!(format = other, "Unknown output audio format");
       return;
     }
   };
 
-  if !args.input_path.is_file() {
-    tracing::error!(input = ?args.input_path, "Input path is not regular file");
+  let executable_path = std::env::current_exe().unwrap();
+  let executable_dir = executable_path.parent().unwrap();
+
+  let models_dir = args.models_dir.unwrap_or(executable_dir.join("models"));
+  if !models_dir.exists() {
+    tracing::error!("Failed to find models directory: {}. If your models are elsewhere, specify the directory with --models-dir", models_dir.display());
     return;
   }
 
-  if !args.output_path.is_dir() {
-    tracing::error!(output = ?args.output_path, "Output path is not directory");
+  // Mandatory (dynamic linking)
+  let onnx_runtime_path = args.onnx_runtime_path;
+  if !onnx_runtime_path.exists() {
+    tracing::error!(
+      "Failed to find onnxruntime: {}",
+      onnx_runtime_path.display()
+    );
     return;
   }
 
-  let preset = &MDX_PRESETS[preset];
-  let mdx = match preset.build() {
-    Ok(mdx) => mdx,
-    Err(err) => {
-      tracing::error!(%err, "Failed to build the model");
-      return;
-    }
+  let opts = pvr::SeparateOptions {
+    model: args.model.clone(),
+    backends,
+    output_format,
+    models_dir: Some(models_dir),
+    onnx_runtime_path: Some(onnx_runtime_path),
   };
 
-  let mix = match read_audio(&args.input_path) {
-    Ok(mix) => mix,
-    Err(err) => {
-      tracing::error!(%err, "Failed to read audio");
-      return;
+  // Show models if none selected (behavior preserved)
+  if args.model.is_none() {
+    tracing::info!("Please specify the model you wish to use");
+    tracing::info!("All available models:");
+    for (id, name) in pvr::available_models(&opts.models_dir) {
+      tracing::info!("{id}. {name}");
     }
-  };
-
-  let res = match mdx.demix(mix.view()) {
-    Ok(res) => res,
-    Err(err) => {
-      tracing::error!(%err, "Failed to inference");
-      return;
-    }
-  };
-
-  let origin_filename = args
-    .input_path
-    .file_stem()
-    .expect("Failed to get input file stem")
-    .to_string_lossy();
-
-  let primary_filename = format!(
-    "{origin_filename}_{}.{}",
-    preset.model_type.get_primary_stem(),
-    output_format.extension()
-  );
-  let secondary_filename = format!(
-    "{origin_filename}_{}.{}",
-    preset.model_type.get_secondary_stem(),
-    output_format.extension()
-  );
-
-  if let Err(err) = write_audio(
-    args.output_path.join(primary_filename),
-    res.view(),
-    &output_format,
-  ) {
-    tracing::error!(%err, "Failed to write the primary stem");
+    return;
   }
 
-  if let Err(err) = write_audio(
-    args.output_path.join(secondary_filename),
-    (mix - res).view(),
-    &output_format,
-  ) {
-    tracing::error!(%err, "Failed to write the secondary stem");
+  let input: PathBuf = args.input_path;
+  let outdir: PathBuf = args.output_path;
+
+  match pvr::separate_to_files(&input, &outdir, &opts) {
+    Ok((p1, p2)) => {
+      tracing::info!(primary = %p1.display(), secondary = %p2.display(), "Separation complete");
+    }
+    Err(err) => {
+      tracing::error!(%err, "Separation failed");
+    }
   }
 }

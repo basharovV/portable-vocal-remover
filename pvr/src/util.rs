@@ -213,6 +213,7 @@ pub fn read_audio(path: impl AsRef<Path>) -> Result<Array2<f64>> {
   Ok(res)
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum AudioFormat {
   Wav,
   Flac,
