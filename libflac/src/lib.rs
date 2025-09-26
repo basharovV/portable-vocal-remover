@@ -51,7 +51,7 @@ impl Encoder {
       )
     };
     if res != FLAC__StreamEncoderInitStatus_FLAC__STREAM_ENCODER_INIT_STATUS_OK {
-      return Err(Error::EncoderInitFailure(res));
+      return Err(Error::EncoderInitFailure(res.try_into().unwrap()));
     }
     let raw_self = ManuallyDrop::new(self);
     Ok(InitializedEncoder(raw_self.0))
