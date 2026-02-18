@@ -17,6 +17,7 @@ fn main() {
   let libdir = install_dir.join("lib");
 
   println!("cargo:rustc-link-search=native={}", libdir.display());
+  println!("cargo:rustc-link-search=native={}", install_dir.join("lib64").display());
   println!("cargo:rustc-link-lib=static=FLAC");
 
   let bindings = bindgen::Builder::default()
